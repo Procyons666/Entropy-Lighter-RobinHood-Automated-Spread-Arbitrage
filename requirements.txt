@@ -1,0 +1,8 @@
+# base requirements — enough for --record-only data collection;
+# live trading additionally needs requirements-live.txt
+# 基础依赖 —— 仅够 --record-only 数据采集；实盘另需 requirements-live.txt
+aiohttp>=3.9
+websockets>=12.0
+python-dotenv>=1.0
+PyYAML>=6.0
+rich>=13.0
