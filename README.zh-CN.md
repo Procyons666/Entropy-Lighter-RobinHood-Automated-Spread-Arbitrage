@@ -2,6 +2,7 @@
 
 **[English documentation / 英文文檔 → README.md](README.md)**
 **[完整繁體中文教學 → TUTORIAL.zh-CN.md](TUTORIAL.zh-CN.md)**
+**[新手懶人包（從零開始）→ 新手懶人包.md](新手懶人包.md)**
 
 開源雙交易所永續合約套利機器人。其中一條腿永遠是 **Entropy**（Hyperliquid 上的 `io` builder dex）；另一條腿（對沖腿）三選一：
 
