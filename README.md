@@ -1,241 +1,132 @@
-# entropy-arb
+# Entropy & Lighter / Robinhood Hood 自動化價差套利機器人
 
-**[中文文档 / Chinese documentation → README.zh-CN.md](README.zh-CN.md)**
+**[English documentation → README.en.md](README.en.md)**
+**[完整繁體中文教學 → TUTORIAL.zh-CN.md](TUTORIAL.zh-CN.md)**
+**[新手懶人包（從零開始）→ 新手懶人包.md](新手懶人包.md)**
 
-Open-source two-venue perp arbitrage bot. One leg is always **Entropy**
-(the `io` builder dex on Hyperliquid); the other leg — the hedge — is one of:
+開源雙交易所永續合約套利機器人。其中一條腿永遠是 **Entropy**（Hyperliquid 上的 `io` builder dex）；另一條腿（對沖腿）三選一：
 
-| `--hedge` | venue | quote | taker fee | protocol |
+| `--hedge` 參數 | 交易所 | 計價貨幣 | 吃單手續費 | 協議 |
 |---|---|---|---|---|
-| `lighter` | Lighter mainnet | USDC | 0 bps | zkLighter ws (diff books, async settle) |
-| `lighter-rh` | Lighter Robinhood chain | **USDG** | 0 bps | zkLighter ws |
-| `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book, sync IOC settle |
+| `lighter` | Lighter 主網 | USDC | 0 bps | zkLighter ws（增量訂單簿，非同步結算） |
+| `lighter-rh` | Lighter Robinhood Chain | **USDG** | 0 bps | zkLighter ws |
+| `tradexyz` | Hyperliquid trade.xyz dex | USDC | ~1 bps | HL l2Book，IOC 同步結算 |
 
-> **Referral links** — signing up through these supports this project:
-> - Entropy — 25% fee discount: <https://entropy.io/?r=procyons>
-> - Lighter Robinhood chain: <https://robinhoodchain.lighter.xyz/?referral=PROCYONSS&source=none>
+> **支持作者** —— 透過以下連結註冊，讓我們一起獲得獎勵：
+> - Entropy — 享 25% 費率優惠：<https://entropy.io/?r=procyons>
+> - Lighter Robinhood Chain：<https://robinhoodchain.lighter.xyz/?referral=PROCYONSS&source=none>
 
-When the same symbol trades rich on one venue and cheap on the other, the bot
-simultaneously sells the rich book and buys the cheap book with taker orders,
-carrying a delta-neutral position until the premium reverts and the opposite
-crossing unwinds it. Every price it acts on is the **actual order book of the
-exchange that will fill the order** — Hyperliquid books come from the official
-websocket (`wss://api.hyperliquid.xyz/ws`), Lighter books from Lighter's
-official websocket.
+當同一個交易品種在一邊貴、另一邊便宜時，機器人會同時在貴的一邊賣出、便宜的一邊買入（均為吃單），持有 delta 中性倉位，等溢價回歸後反向平倉。所有交易決策使用的價格都來自**將要實際成交的那個交易所的真實訂單簿**——Hyperliquid 的盤口來自官方 WebSocket（`wss://api.hyperliquid.xyz/ws`），Lighter 的盤口來自 Lighter 官方 WebSocket。
 
-While it runs — even with no credentials and no strategy — it records both
-books to **1-minute CSV bars**, and the bundled analyzer turns that data into
-the three numbers that define the whole strategy.
+機器人運行期間（即使沒有密鑰、沒有開策略）會自動把兩邊盤口記錄成**分鐘級 CSV 數據**，配套的分析工具可以直接把這些數據變成策略所需的三個核心參數。
 
-## The signal
+## 信號邏輯
 
-The band is three numbers in `config.yaml`, derived by you from recorded
-data:
+整個信號就是 `config.yaml` 裡三個數字，由你根據採集的數據自己設定：
 
 ```
-premium_bps = (Entropy price / hedge price − 1) × 10 000
+premium_bps =（Entropy 價格 / 對沖腿價格 − 1）× 10,000
 
-                          ┌──────────────  SELL entropy + BUY hedge
+                          ┌──────────────  賣出 Entropy + 買入對沖腿
 midline + upper  ───────────────────────────────────────────────────
                                        ▲
-midline          ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   the premium's usual level
+midline          ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┼ ─ ─   溢價的長期中樞
                                        ▼
 midline − lower  ───────────────────────────────────────────────────
-                          └──────────────  BUY entropy + SELL hedge
+                          └──────────────  買入 Entropy + 賣出對沖腿
 ```
 
-- `midline_bps` — where the premium normally sits. Cross-venue premiums are
-  rarely centered at zero (different oracles, different quote assets, listing
-  premia), so a zero-centered band would fire one direction only, cap out and
-  never unwind. Measure where the premium actually sits and type it in.
-- `upper_bps` / `lower_bps` — the entry bands on each side of the midline.
+- `midline_bps` —— 溢價的常態水平。請實際測量溢價所在的位置後填入，**填錯即虧損**。
+- `upper_bps` / `lower_bps` —— 中樞上下兩側的入場帶寬。
 
-Both hurdles are applied to **executable** prices (entropy bid vs hedge ask,
-and vice versa) and are **net of both venues' taker fees** — the engine adds
-fees on top before a slice qualifies. A full round trip therefore nets
-**≥ upper + lower bps after fees by construction**.
+兩個方向的門檻都是**扣除雙邊吃單手續費之後的淨門檻**。一次完整來回扣費後**淨賺 ≥ upper + lower bps**，結構上保證。
 
-One consequence worth understanding: with `midline_bps: 5`, the buy-entropy
-hurdle is `lower − midline`, which can be **negative**. That is intentional —
-if entropy is persistently 5 bps rich, buying it at a 0 bps premium is 5 bps
-cheap versus its own equilibrium, and that trade is the profitable unwind of
-an earlier sell at `midline + upper`. It also means a **wrong midline loses
-money**: if you type `midline_bps: 5` while the true premium sits at 0, the
-bot happily buys entropy at fair value all day. Measure first, then trade —
-that is what the recorder and analyzer are for.
-
-## Quick start
+## 快速開始
 
 ```bash
-git clone https://github.com/your-quantguy/entropy-arb.git && cd entropy-arb
+git clone https://github.com/Procyons666/Entropy-Lighter-RobinHood-Automated-Spread-Arbitrage.git
+cd Entropy-Lighter-RobinHood-Automated-Spread-Arbitrage
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt          # data collection needs only this
+pip install -r requirements.txt
 
-cp config.example.yaml config.yaml       # the strategy (thresholds, sizing, risk)
-cp .env.example .env                     # credentials — required to trade
+cp config.example.yaml config.yaml
+cp .env.example .env
 ```
 
-The markets are **not** in the config file — you state them explicitly on
-every start: `--symbol` (traded on both venues) and `--hedge` (one of
-`lighter`, `lighter-rh`, `tradexyz`; Entropy is always the
-other leg).
-
-There is **no paper mode** — the bot either collects data (`--record-only`)
-or trades live. Validate with recorded data and tiny position caps, not with
-simulated fills.
-
-**1. Collect data first** (no credentials needed):
+**第一步：先採集數據**（不需要任何密鑰，不會下任何訂單）：
 
 ```bash
-python3 main.py --record-only --symbol SNDK --hedge lighter-rh
+python3 main.py --record-only --symbol SNDK --hedge lighter-rh --cn
 ```
 
-Let it run for at least a few hours (a day is better — premiums have
-intraday regimes). It writes `logs/minutes.csv`.
+至少跑幾個小時（建議一整天），數據寫入 `logs/minutes.csv`。
 
-**2. Analyze and set your thresholds:**
+**第二步：分析數據、取得閾值建議：**
 
 ```bash
 python3 tools/analyze.py
 ```
 
-It prints the premium distribution, how often each candidate band would have
-fired, and a ready-to-paste `thresholds:` block for `config.yaml`.
+把輸出的 `thresholds:` 區塊貼入 `config.yaml`。
 
-**3. Go live** — fill in `.env`, install the signing SDKs, and start with
-the smallest position caps that clear the venue minimums:
+**第三步：填入密鑰，開始實盤：**
 
 ```bash
 pip install -r requirements-live.txt
-python3 main.py --symbol SNDK --hedge lighter-rh
+python3 main.py --symbol SNDK --hedge lighter-rh --cn
 ```
 
-Running without `--record-only` sends real orders immediately once both
-feeds are fresh and the band is crossed.
+本機器人**沒有模擬盤**，啟動即為真實下單。請從最小倉位開始。
 
-**Dashboard.** On a terminal the bot shows a live Rich dashboard: both
-books with age/spread, positions and caps, equity and session PnL, the
-executable premium of each direction against its full hurdle (fees and
-inventory surcharge included, ● = armed), recorder progress, the last
-executions, and a tail of the log (the full log goes to `logging.file`,
-default `logs/engine.log`). It works in `--record-only` too. Add `--cn` to
-display the dashboard in Chinese. Use `--no-dashboard` for plain console
-logs (nohup/systemd — off-terminal runs fall back automatically), or set
-`logging.dashboard: false`.
+## 取得 API 密鑰
 
-## Data collection & analysis
+**Hyperliquid（Entropy 腿）：**
+1. 前往 [https://app.hyperliquid.xyz/API](https://app.hyperliquid.xyz/API)
+2. 連接主帳號錢包 → 點擊「Generate API Wallet」
+3. 複製 Agent Private Key → 填入 `.env` 的 `HL_PRIVATE_KEY`
+4. 複製主帳號地址 → 填入 `.env` 的 `HL_ACCOUNT_ADDRESS`
 
-The recorder runs automatically in every mode (`recorder.enabled: true`).
-Once per second it samples both live books; once per minute it writes a row:
+**Lighter（對沖腿）：**
+- Robinhood Chain（推薦）：[https://robinhoodchain.lighter.xyz/?referral=PROCYONSS&source=none](https://robinhoodchain.lighter.xyz/?referral=PROCYONSS&source=none)
+- 依照 [lighter-python 文件](https://github.com/elliottech/lighter-python) 建立 API Key
 
-| column | meaning |
-|---|---|
-| `minute_ts`, `time_utc` | minute start (epoch seconds, ISO UTC) |
-| `entropy_bid/ask`, `hedge_bid/ask` | last fresh top-of-book of the minute |
-| `premium_open/high/low/close/mean/std_bps` | mid-to-mid premium of Entropy over the hedge |
-| `sell_edge_mean/max_bps` | executable premium for SELL entropy (entropy bid / hedge ask − 1) |
-| `buy_edge_mean/max_bps` | executable premium for BUY entropy (hedge bid / entropy ask − 1) |
-| `samples` | how many of the ~60 seconds both books were fresh |
+## 配置說明
 
-Recorded edges are pre-fee; the analyzer subtracts `--fees-bps` (pass the
-**sum** of both venues' taker fees — default 0.0 for the zero-fee venues,
-~1.0 with a `tradexyz` hedge) before counting firings, so its table and
-suggestions translate directly into config values. `--hours 24` restricts to
-recent data; premiums drift, so re-run it regularly and update
-`config.yaml`.
-
-## Configuration
-
-Strategy lives in `config.yaml` (validated — unknown keys are startup
-errors), credentials in `.env`, and the markets on the command line
-(`--symbol`, `--hedge`). Full commented reference:
-[config.example.yaml](config.example.yaml). The essentials:
-
-| key | meaning | default |
+| 鍵 | 說明 | 預設值 |
 |---|---|---|
-| `thresholds.midline_bps` | premium center (measure it!) | — |
-| `thresholds.upper_bps` / `lower_bps` | entry bands (> 0) | — |
-| `entropy.dex` | Entropy's dex name on Hyperliquid | `io` |
-| `*.taker_fee_bps` | per-venue taker fee | 0.0 (tradexyz hedge: 1.0) |
-| `*.max_position_usd` | per-venue position cap | 1000 |
-| `*.max_orders_per_min` | per-venue send budget (sliding 60 s) | 120; lighter hedges 30 |
-| `sizing.take_fraction` | fraction of crossable depth taken | 0.5 |
-| `sizing.max_order_notional_usd` | per-slice cap | 500 |
-| `inventory.scale_bps` / `floor_frac` | inventory ladder (extra bps past `floor_frac` of the cap) | 10 / 0.5 |
-| `execution.premium_persist_sec` | edge must persist before firing | 0.3 |
-| `execution.*` | slippage bounds, timeouts, reconcile cadence… | see file |
-| `recorder.*` | minute-data recorder | on, `logs/minutes.csv` |
-| `logging.dashboard` / `logging.file` | Rich dashboard on a tty; log file while it runs | on, `logs/engine.log` |
+| `thresholds.midline_bps` | 溢價中樞（**必須實測**） | — |
+| `thresholds.upper_bps` / `lower_bps` | 入場帶寬（> 0） | — |
+| `*.max_position_usd` | 各所持倉上限 | 1000 |
+| `sizing.max_order_notional_usd` | 單筆名義上限 | 500 |
+| `execution.premium_persist_sec` | 信號需持續多久才觸發 | 0.3 |
 
-## Credentials (`.env`, live only)
+完整參數說明請見：[config.example.yaml](config.example.yaml)
 
-- **Entropy / tradexyz (Hyperliquid)** — create an API ("agent") wallet at
-  <https://app.hyperliquid.xyz/API>. `HL_PRIVATE_KEY` is the **agent** key,
-  `HL_ACCOUNT_ADDRESS` your main account address. With `--hedge tradexyz`
-  both legs share this account by default (one nonce sequence is handled
-  internally); set `HL_PRIVATE_KEY_XYZ` / `HL_ACCOUNT_ADDRESS_XYZ`
-  to split them. Fund the dex-specific clearinghouses you trade.
-- **Lighter** — `LIGHTER_ACCOUNT_INDEX`, `LIGHTER_API_KEY_INDEX`,
-  `LIGHTER_API_PRIVATE_KEY`, registered on the **same deployment** as your
-  `--hedge` flag (mainnet and the Robinhood chain are separate accounts and
-  keys — see [lighter-python](https://github.com/elliottech/lighter-python)).
-
-## How execution works
-
-- Both legs are **taker** orders sent concurrently: Lighter market orders
-  with average-price protection settling on the authenticated account
-  websocket; Hyperliquid IOC limits settling synchronously (with
-  orderStatus polling for unknown outcomes).
-- A **persistence gate** (`premium_persist_sec`) arms each direction and only
-  fires if the edge survives — one-tick phantoms are filtered.
-- **Inventory ladder**: past `floor_frac` of a venue's cap, adding to the
-  position requires linearly more edge, up to `scale_bps` extra at the cap.
-- **Net-delta hedge**: if legs fill unevenly, the imbalance is immediately
-  reduced (reduce-only, price-protected), and positions are reconciled
-  against the chain every `reconcile_sec`.
-- **Failure containment**: a rate-limited venue pauses briefly; an
-  unreachable venue (e.g. exchange maintenance) pauses trading and is probed
-  every `venue_probe_sec` until it recovers; `max_consecutive_errors`
-  execution pathologies halt the engine entirely.
-- **Live-only**: there is no simulated-fill mode. `--record-only` is the
-  risk-free way to run it; anything else trades real money.
-
-## Layout
+## 目錄結構
 
 ```
-main.py                  entry point (--record-only, or live by default)
-entropy_arb/config.py    YAML + .env contract, validation
-entropy_arb/book.py      order books + fee-aware crossing/sizing math
-entropy_arb/feeds.py     official HL ws + zkLighter ws book feeds
-entropy_arb/venue_hl.py  Hyperliquid dex adapter (Entropy, tradexyz)
-entropy_arb/venue_lighter.py  zkLighter adapter (mainnet, Robinhood chain)
-entropy_arb/engine.py    the two-venue strategy loop
-entropy_arb/dashboard.py Rich terminal dashboard
-entropy_arb/recorder.py  1-minute orderbook bars
-tools/analyze.py         minutes.csv -> suggested thresholds
-tests/                   python3 -m pytest tests/
+main.py                       入口
+entropy_arb/config.py         配置載入與校驗
+entropy_arb/engine.py         策略主循環
+entropy_arb/book.py           訂單簿與套利計算
+entropy_arb/feeds.py          WebSocket 行情
+entropy_arb/venue_hl.py       Hyperliquid 適配器
+entropy_arb/venue_lighter.py  Lighter 適配器
+entropy_arb/recorder.py       分鐘數據採集
+entropy_arb/dashboard.py      Rich 終端儀表板
+tools/analyze.py              數據分析 → 閾值建議
 ```
 
-## Known risks
+## 已知風險
 
-- **A wrong midline is a losing strategy.** The premium center drifts;
-  re-measure regularly and keep `config.yaml` current.
-- **USDG basis** (`lighter-rh`): the hedge quotes in USDG. Part of any
-  persistent premium is the stablecoin itself; your midline absorbs the
-  level, but a USDG *move* is real PnL.
-- **Funding**: two venues, two independent funding rates; carry is not
-  modeled. Position caps bound it — keep them modest.
-- **Thin books**: Entropy depth can be tiny; `take_fraction` and notional
-  caps keep clips small, but slippage on the hedge leg after a partial fill
-  is real.
-- **Market hours**: for equity perps (e.g. SNDK), off-hours oracle regimes
-  differ per venue; consider wider bands or not trading them.
-- **One-leg risk**: a leg can fail after the other filled. The bot hedges
-  and reconciles automatically, but you should still watch it.
+- **midline 填錯就是虧損策略** —— 請定期重新採集數據更新
+- **USDG 基差**（`lighter-rh`）—— USDG 本身的波動是真實盈虧
+- **資金費率** —— 兩所各自獨立，持倉成本未建模，請控制倉位規模
+- **薄盤口** —— Entropy 深度可能很小，注意滑點
+- **單腿風險** —— 一腿成交後另一腿可能失敗，機器人會自動對沖但需人工監控
 
-Use at your own risk. This is trading software operating with real money;
-nothing here is investment advice. Start with tiny position caps.
+風險自負。本軟體直接操作真實資金，不構成任何投資建議。
 
-## License
+## 開源授權
 
 [MIT](LICENSE)
